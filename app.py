@@ -8,16 +8,21 @@ import time
 from bs4 import BeautifulSoup
 from urllib.parse import urlparse, parse_qs, unquote
 from flask import Flask, request, send_file, jsonify
+from flask_cors import CORS
 import yt_dlp
 
+# ------------------- Flask setup -------------------
 app = Flask(__name__)
+CORS(app)  # Enable CORS so HTML pages from any origin can call the API
 lock = threading.Lock()
 
+# ------------------- Image scraper -------------------
 def google_image_worker(search_word, folder, downloaded_image_urls):
     BASE_URL = "https://www.google.com/search?q={word}&tbm=isch&safe=off&start={start}"
     start = 0
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
     counter_images = itertools.count(1)
+
     while start < 60:
         try:
             url = BASE_URL.format(word=search_word, start=start)
@@ -52,10 +57,12 @@ def google_image_worker(search_word, folder, downloaded_image_urls):
         except:
             time.sleep(5)
 
+# ------------------- Video scraper -------------------
 def google_video_worker(search_word, folder, downloaded_video_urls):
     BASE_URL = "https://www.google.com/search?q={word}&tbm=vid&safe=off&start={start}"
     start = 0
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+
     while start < 30:
         try:
             url = BASE_URL.format(word=search_word, start=start)
@@ -94,18 +101,23 @@ def download_video(link, folder):
     except:
         pass
 
+# ------------------- Flask API route -------------------
 @app.route("/download", methods=["POST"])
 def download_api():
     data = request.json
     search_word = data.get("search_word")
     mode = data.get("mode", "both").lower()
+
     if not search_word:
         return {"error": "search_word is required"}, 400
+
     temp_folder = os.path.join(os.getcwd(), "downloads", f"{search_word}")
     os.makedirs(temp_folder, exist_ok=True)
+
     downloaded_image_urls = set()
     downloaded_video_urls = set()
     threads = []
+
     if mode in ["images", "both"]:
         t = threading.Thread(target=google_image_worker, args=(search_word, temp_folder, downloaded_image_urls))
         t.start()
@@ -114,18 +126,25 @@ def download_api():
         t = threading.Thread(target=google_video_worker, args=(search_word, temp_folder, downloaded_video_urls))
         t.start()
         threads.append(t)
+
     for t in threads:
         t.join()
+
+    # Create ZIP of all files
     zip_buffer = io.BytesIO()
     with zipfile.ZipFile(zip_buffer, "w") as zipf:
         for root, _, files in os.walk(temp_folder):
             for file in files:
                 zipf.write(os.path.join(root, file), arcname=file)
     zip_buffer.seek(0)
+
+    # Clean up temp folder
     for root, _, files in os.walk(temp_folder):
         for file in files:
             os.remove(os.path.join(root, file))
+
     return send_file(zip_buffer, mimetype="application/zip", as_attachment=True, download_name=f"{search_word}_{mode}.zip")
 
+# ------------------- Run Flask -------------------
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
