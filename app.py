@@ -1,142 +1,66 @@
 import os
-import io
 import requests
-import threading
-import itertools
-import time
-from bs4 import BeautifulSoup
-from flask import Flask, request, send_file, jsonify, Response, abort
+from flask import Flask, request, jsonify, send_file, abort
 from flask_cors import CORS
-import yt_dlp
 
 app = Flask(__name__)
 CORS(app)
-lock = threading.Lock()
 
-# ---------------- IMAGE ----------------
-def google_image_worker(search_word, folder, downloaded_image_urls, count):
-    BASE_URL = "https://www.google.com/search?q={word}&tbm=isch&safe=off&start={start}"
-    start = 0
-    headers = {"User-Agent": "Mozilla/5.0"}
-    counter_images = itertools.count(1)
+PEXELS_API_KEY = "YOUR_PEXELS_API_KEY"  # get from https://www.pexels.com/api/
 
-    while len(downloaded_image_urls) < count and start < 200:
-        try:
-            url = BASE_URL.format(word=search_word, start=start)
-            response = requests.get(url, headers=headers, timeout=10)
-            soup = BeautifulSoup(response.text, "html.parser")
-            images = soup.find_all("img")
-            for img in images:
-                src = img.get("src")
-                if not src or not src.startswith("http"):
-                    continue
-                with lock:
-                    if src in downloaded_image_urls:
-                        continue
-                    downloaded_image_urls.add(src)
-                img_num = next(counter_images)
-                file_path = os.path.join(folder, f"{search_word}_img_{img_num}.jpg")
-                try:
-                    img_data = requests.get(src, headers=headers, timeout=10).content
-                    with open(file_path, "wb") as f:
-                        f.write(img_data)
-                    if len(downloaded_image_urls) >= count:
-                        break
-                except:
-                    continue
-            start += 20
-        except:
-            time.sleep(2)
+def download_media_from_pexels(query, image_count=5, video_count=2):
+    folder = os.path.join("downloads", query)
+    os.makedirs(folder, exist_ok=True)
+    files = []
 
-# ---------------- VIDEO (YouTube search) ----------------
-def youtube_video_worker(search_word, folder, downloaded_video_urls, count):
-    ydl_opts = {
-        'outtmpl': os.path.join(folder, '%(title)s.%(ext)s'),
-        'format': 'mp4/best',
-        'quiet': True
-    }
-    query = f"ytsearch{count}:{search_word}"  # Search on YouTube
-    with lock:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(query, download=True)
-            # Extract video URLs for preview
-            if 'entries' in info:
-                for entry in info['entries']:
-                    if entry:
-                        downloaded_video_urls.add(entry.get('webpage_url'))
+    headers = {"Authorization": PEXELS_API_KEY}
 
-# ---------------- API ----------------
+    # ---- Images ----
+    if image_count > 0:
+        img_resp = requests.get(f"https://api.pexels.com/v1/search?query={query}&per_page={image_count}", headers=headers).json()
+        for i, photo in enumerate(img_resp.get("photos", []), 1):
+            url = photo["src"]["original"]
+            file_path = os.path.join(folder, f"{query}_img_{i}.jpg")
+            r = requests.get(url)
+            with open(file_path, "wb") as f:
+                f.write(r.content)
+            files.append(f"/media/{query}/{query}_img_{i}.jpg")
+
+    # ---- Videos ----
+    if video_count > 0:
+        vid_resp = requests.get(f"https://api.pexels.com/videos/search?query={query}&per_page={video_count}", headers=headers).json()
+        for i, vid in enumerate(vid_resp.get("videos", []), 1):
+            url = vid["video_files"][0]["link"]
+            file_path = os.path.join(folder, f"{query}_vid_{i}.mp4")
+            r = requests.get(url)
+            with open(file_path, "wb") as f:
+                f.write(r.content)
+            files.append(f"/media/{query}/{query}_vid_{i}.mp4")
+
+    return files
+
+# ---- API ----
 @app.route("/download", methods=["POST"])
 def download_api():
     data = request.json
-    search_word = data.get("search_word")
-    mode = data.get("mode", "both").lower()
-    image_count = int(data.get("image_count", 5))
-    video_count = int(data.get("video_count", 2))
+    query = data.get("search_word")
+    images = int(data.get("image_count", 5))
+    videos = int(data.get("video_count", 2))
 
-    if not search_word:
-        return {"error": "search_word is required"}, 400
+    if not query:
+        return {"error": "search_word required"}, 400
 
-    temp_folder = os.path.join(os.getcwd(), "downloads", search_word)
-    os.makedirs(temp_folder, exist_ok=True)
-
-    downloaded_image_urls = set()
-    downloaded_video_urls = set()
-    threads = []
-
-    if mode in ["images", "both"]:
-        t = threading.Thread(target=google_image_worker, args=(search_word, temp_folder, downloaded_image_urls, image_count))
-        t.start()
-        threads.append(t)
-    if mode in ["videos", "both"]:
-        t = threading.Thread(target=youtube_video_worker, args=(search_word, temp_folder, downloaded_video_urls, video_count))
-        t.start()
-        threads.append(t)
-
-    for t in threads:
-        t.join()
-
-    # Return list of file URLs for preview
-    files = []
-    for root, _, filenames in os.walk(temp_folder):
-        for f in filenames:
-            files.append(f"/media/{search_word}/{f}")
-
+    files = download_media_from_pexels(query, images, videos)
     return jsonify({"files": files})
 
-# ---------------- Serve media files ----------------
+# ---- Serve media ----
 @app.route("/media/<search>/<filename>")
 def serve_media(search, filename):
-    folder = os.path.join(os.getcwd(), "downloads", search)
+    folder = os.path.join("downloads", search)
     file_path = os.path.join(folder, filename)
     if not os.path.exists(file_path):
         abort(404)
+    return send_file(file_path)
 
-    # Handle range requests for video streaming
-    range_header = request.headers.get("Range", None)
-    if not range_header:
-        return send_file(file_path)
-
-    size = os.path.getsize(file_path)
-    byte1, byte2 = 0, None
-
-    match = range_header.replace("bytes=", "").split("-")
-    if match[0]:
-        byte1 = int(match[0])
-    if len(match) > 1 and match[1]:
-        byte2 = int(match[1])
-
-    length = size - byte1 if byte2 is None else byte2 - byte1 + 1
-    with open(file_path, "rb") as f:
-        f.seek(byte1)
-        data = f.read(length)
-
-    resp = Response(data, 206, mimetype="video/mp4",
-                    content_type="video/mp4",
-                    direct_passthrough=True)
-    resp.headers.add("Content-Range", f"bytes {byte1}-{byte1 + length - 1}/{size}")
-    return resp
-
-# ---------------- Run Flask ----------------
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)), debug=True)
+    app.run(host="0.0.0.0", port=5000, debug=True)
