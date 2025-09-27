@@ -3,10 +3,8 @@ import io
 import requests
 import threading
 import itertools
-import zipfile
 import time
 from bs4 import BeautifulSoup
-from urllib.parse import urlparse, parse_qs, unquote
 from flask import Flask, request, send_file, jsonify, Response, abort
 from flask_cors import CORS
 import yt_dlp
@@ -50,47 +48,22 @@ def google_image_worker(search_word, folder, downloaded_image_urls, count):
         except:
             time.sleep(2)
 
-# ---------------- VIDEO ----------------
-def google_video_worker(search_word, folder, downloaded_video_urls, count):
-    BASE_URL = "https://www.google.com/search?q={word}&tbm=vid&safe=off&start={start}"
-    start = 0
-    headers = {"User-Agent": "Mozilla/5.0"}
-
-    while len(downloaded_video_urls) < count and start < 100:
-        try:
-            url = BASE_URL.format(word=search_word, start=start)
-            response = requests.get(url, headers=headers, timeout=10)
-            soup = BeautifulSoup(response.text, "html.parser")
-            video_links = []
-            for a in soup.find_all("a"):
-                href = a.get("href")
-                if href and href.startswith("/url?q="):
-                    parsed = parse_qs(urlparse(href).query)
-                    if "q" in parsed:
-                        real_url = unquote(parsed["q"][0])
-                        video_links.append(real_url)
-            for link in video_links:
-                with lock:
-                    if link in downloaded_video_urls:
-                        continue
-                    downloaded_video_urls.add(link)
-                download_video(link, folder)
-                if len(downloaded_video_urls) >= count:
-                    break
-            start += 10
-        except:
-            time.sleep(2)
-
-def download_video(link, folder):
-    try:
-        ydl_opts = {
-            'outtmpl': os.path.join(folder, '%(title)s.%(ext)s'),
-            'format': 'mp4/best'
-        }
+# ---------------- VIDEO (YouTube search) ----------------
+def youtube_video_worker(search_word, folder, downloaded_video_urls, count):
+    ydl_opts = {
+        'outtmpl': os.path.join(folder, '%(title)s.%(ext)s'),
+        'format': 'mp4/best',
+        'quiet': True
+    }
+    query = f"ytsearch{count}:{search_word}"  # Search on YouTube
+    with lock:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            ydl.download([link])
-    except:
-        pass
+            info = ydl.extract_info(query, download=True)
+            # Extract video URLs for preview
+            if 'entries' in info:
+                for entry in info['entries']:
+                    if entry:
+                        downloaded_video_urls.add(entry.get('webpage_url'))
 
 # ---------------- API ----------------
 @app.route("/download", methods=["POST"])
@@ -116,7 +89,7 @@ def download_api():
         t.start()
         threads.append(t)
     if mode in ["videos", "both"]:
-        t = threading.Thread(target=google_video_worker, args=(search_word, temp_folder, downloaded_video_urls, video_count))
+        t = threading.Thread(target=youtube_video_worker, args=(search_word, temp_folder, downloaded_video_urls, video_count))
         t.start()
         threads.append(t)
 
