@@ -1,66 +1,58 @@
-import os
-import requests
-from flask import Flask, request, jsonify, send_file, abort
+import time
+from bs4 import BeautifulSoup
+from urllib.parse import urlparse, parse_qs, unquote
+from flask import Flask, request, send_file, jsonify
+from flask import Flask, request, send_file, jsonify, Response, abort
 from flask_cors import CORS
+import yt_dlp
 
-app = Flask(__name__)
-CORS(app)
+@@ -83,7 +83,10 @@ def google_video_worker(search_word, folder, downloaded_video_urls, count):
 
-PEXELS_API_KEY = "YOUR_PEXELS_API_KEY"  # get from https://www.pexels.com/api/
-
-def download_media_from_pexels(query, image_count=5, video_count=2):
-    folder = os.path.join("downloads", query)
-    os.makedirs(folder, exist_ok=True)
-    files = []
-
-    headers = {"Authorization": PEXELS_API_KEY}
-
-    # ---- Images ----
-    if image_count > 0:
-        img_resp = requests.get(f"https://api.pexels.com/v1/search?query={query}&per_page={image_count}", headers=headers).json()
-        for i, photo in enumerate(img_resp.get("photos", []), 1):
-            url = photo["src"]["original"]
-            file_path = os.path.join(folder, f"{query}_img_{i}.jpg")
-            r = requests.get(url)
-            with open(file_path, "wb") as f:
-                f.write(r.content)
-            files.append(f"/media/{query}/{query}_img_{i}.jpg")
-
-    # ---- Videos ----
-    if video_count > 0:
-        vid_resp = requests.get(f"https://api.pexels.com/videos/search?query={query}&per_page={video_count}", headers=headers).json()
-        for i, vid in enumerate(vid_resp.get("videos", []), 1):
-            url = vid["video_files"][0]["link"]
-            file_path = os.path.join(folder, f"{query}_vid_{i}.mp4")
-            r = requests.get(url)
-            with open(file_path, "wb") as f:
-                f.write(r.content)
-            files.append(f"/media/{query}/{query}_vid_{i}.mp4")
-
-    return files
-
-# ---- API ----
-@app.route("/download", methods=["POST"])
-def download_api():
-    data = request.json
-    query = data.get("search_word")
-    images = int(data.get("image_count", 5))
-    videos = int(data.get("video_count", 2))
-
-    if not query:
-        return {"error": "search_word required"}, 400
-
-    files = download_media_from_pexels(query, images, videos)
-    return jsonify({"files": files})
-
-# ---- Serve media ----
+def download_video(link, folder):
+    try:
+        ydl_opts = {'outtmpl': os.path.join(folder, '%(title)s.%(ext)s')}
+        ydl_opts = {
+            'outtmpl': os.path.join(folder, '%(title)s.%(ext)s'),
+            'format': 'mp4/best'
+        }
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            ydl.download([link])
+    except:
+@@ -132,8 +135,35 @@ def download_api():
 @app.route("/media/<search>/<filename>")
 def serve_media(search, filename):
-    folder = os.path.join("downloads", search)
+    folder = os.path.join(os.getcwd(), "downloads", search)
+    return send_file(os.path.join(folder, filename))
     file_path = os.path.join(folder, filename)
     if not os.path.exists(file_path):
         abort(404)
-    return send_file(file_path)
 
+    # Handle range requests for video streaming
+    range_header = request.headers.get("Range", None)
+    if not range_header:
+        return send_file(file_path)
+
+    size = os.path.getsize(file_path)
+    byte1, byte2 = 0, None
+
+    match = range_header.replace("bytes=", "").split("-")
+    if match[0]:
+        byte1 = int(match[0])
+    if len(match) > 1 and match[1]:
+        byte2 = int(match[1])
+
+    length = size - byte1 if byte2 is None else byte2 - byte1 + 1
+    with open(file_path, "rb") as f:
+        f.seek(byte1)
+        data = f.read(length)
+
+    resp = Response(data, 206, mimetype="video/mp4",
+                    content_type="video/mp4",
+                    direct_passthrough=True)
+    resp.headers.add("Content-Range", f"bytes {byte1}-{byte1 + length - 1}/{size}")
+    return resp
+
+# ---------------- Run Flask ----------------
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000, debug=True)
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)), debug=True)
